@@ -12,29 +12,142 @@ enum class SimulationMode {
     WhiteNoise,       
     ConstWhiteNoise,         
     ConstWhiteNoiseOpen,      
-    ConstWhiteNoisePeriodic  
+    ConstWhiteNoisePeriodic,
+    CM_PS,
+    ThreeD_Deterministic,
+    ThreeD_Poisson                
 };
 
 
-// -----------------------------------------------------------------------------
-// Parameter + result structs
-// -----------------------------------------------------------------------------
-struct Params {
+// Common parameters used by all modes
+struct ParamsCommon {
     int    n;        // number of spatial intervals; array size is n+1
     double fstar;
     double mu;
     double eta;
     double zeta;
     double beta;
-    double t_sub;    // coarse sampling 
+    double t_sub;    // coarse sampling per second (Hz)
     double T;        // total time
     double dt;       // fine time step
-    double mu_a;
-    double Nmotor;   // number of motors (negative = deterministic limit)
-    SimulationMode mode;
-    unsigned long long seed;
     double ZETA_GAMMA_THRESHOLD;
+    unsigned long long seed;
+};
+
+// Deterministic mode (no Nmotor, no stochastic)
+struct ParamsDeterministic {
+    int n;
+    double fstar, mu, eta, zeta, beta, t_sub, T, dt;
+    double ZETA_GAMMA_THRESHOLD;
+    unsigned long long seed;
+    double mu_a;
+};
+
+// Poisson mode (finite Nmotor, stochastic binding)
+struct ParamsPoisson {
+    int n;
+    double fstar, mu, eta, zeta, beta, t_sub, T, dt;
+    double ZETA_GAMMA_THRESHOLD;
+    unsigned long long seed;
+    double Nmotor;
     double LAMBDA_SMALL_THRESHOLD;
+    double mu_a;
+};
+
+// White noise approximation
+struct ParamsWhiteNoise {
+    int n;
+    double fstar, mu, eta, zeta, beta, t_sub, T, dt;
+    double ZETA_GAMMA_THRESHOLD;
+    unsigned long long seed;
+    double Nmotor;
+    double mu_a;
+};
+
+// Constant white noise
+struct ParamsConstWhiteNoise {
+    int n;
+    double fstar, mu, eta, zeta, beta, t_sub, T, dt;
+    double ZETA_GAMMA_THRESHOLD;
+    unsigned long long seed;
+    double Nmotor;
+    double mu_a;
+};
+
+// Constant white noise open
+struct ParamsConstWhiteNoiseOpen {
+    int n;
+    double fstar, mu, eta, zeta, beta, t_sub, T, dt;
+    double ZETA_GAMMA_THRESHOLD;
+    unsigned long long seed;
+    double Nmotor;
+    double mu_a;
+};
+
+// Constant white noise periodic
+struct ParamsConstWhiteNoisePeriodic {
+    int n;
+    double fstar, mu, eta, zeta, beta, t_sub, T, dt;
+    double ZETA_GAMMA_THRESHOLD;
+    unsigned long long seed;
+    double Nmotor;
+    double mu_a;
+};
+
+// CM+PS model
+struct ParamsCMPS {
+    int n;
+    double fstar, mu, eta, zeta, beta, t_sub, T, dt;
+    double ZETA_GAMMA_THRESHOLD;
+    unsigned long long seed;
+    double Nmotor;
+    double ps_rate;
+    double LAMBDA_SMALL_THRESHOLD;
+    double mu_a;
+    double rest_rate;
+    SimulationMode mode;
+};
+
+// 3D deterministic
+struct Params3DDet {
+    int n;
+    double fstar, mu, eta, zeta, beta, t_sub, T, dt;
+    double ZETA_GAMMA_THRESHOLD;
+    unsigned long long seed;
+    double d_tilde_1;
+    double d_tilde_2;
+    double d_tilde_3;
+    double d_tilde_4;
+    double mu_a;
+};
+
+// 3D Poisson
+struct Params3D {
+    int n;
+    double fstar, mu, eta, zeta, beta, t_sub, T, dt;
+    double ZETA_GAMMA_THRESHOLD;
+    unsigned long long seed;
+    double Nmotor;
+    double d_tilde_1;
+    double d_tilde_2;
+    double d_tilde_3;
+    double d_tilde_4;
+    double LAMBDA_SMALL_THRESHOLD;
+    double mu_a;
+};
+
+// For backward compatibility and main.cpp
+struct Params {
+    int n;
+    double fstar, mu, eta, zeta, beta, t_sub, T, dt;
+    double ZETA_GAMMA_THRESHOLD;
+    unsigned long long seed;
+    double Nmotor;
+    double LAMBDA_SMALL_THRESHOLD;
+    double ps_rate;
+    double d_tilde_1, d_tilde_2, d_tilde_3, d_tilde_4;
+    SimulationMode mode;
+    double mu_a;
 };
 
 struct Results {
@@ -49,15 +162,16 @@ struct Results {
     // Diagnostics
     std::uint64_t count_large_zeta_gamma{};
     std::uint64_t count_regular_poisson{};
+    std::uint64_t count_poisson_overflow{};
+    std::uint64_t count_invalid_denom{};
 
     static inline std::size_t idx(std::size_t row, std::size_t col, std::size_t ncols) noexcept {
         return row * ncols + col;
     }
 };
 
-// -----------------------------------------------------------------------------
+
 // Initialization
-// -----------------------------------------------------------------------------
 void initialize_fields(int n, double eta, double fstar, double zeta, double Nmotor,
                        std::vector<double>& s,
                        std::vector<double>& gamma0,
@@ -71,14 +185,17 @@ void initialize_fields_deterministic(int n, double eta, double fstar, double zet
                                      std::vector<double>& nplus0,
                                      std::vector<double>& nminus0);
 
-// -----------------------------------------------------------------------------
+
 // Core solvers
-// -----------------------------------------------------------------------------
-Results simulate_episode(const Params& p);                // Stochastic (finite Nmotor)
-Results simulate_episode_deterministic(const Params& p);  // Deterministic limit (Nmotor→∞)
-Results simulate_episode_white_noise(const Params& p);    // wn approximation
-Results simulate_episode_const_white_noise(const Params& p);
-Results simulate_episode_const_white_noise_open(const Params& p);
-Results simulate_episode_const_white_noise_periodic(const Params& p);
+Results simulate_episode(const ParamsPoisson& p);                // Stochastic (finite Nmotor)
+Results simulate_episode_deterministic(const ParamsDeterministic& p);  // Deterministic limit (Nmotor→∞)
+Results simulate_episode_white_noise(const ParamsWhiteNoise& p);    // wn approximation
+Results simulate_episode_const_white_noise(const ParamsConstWhiteNoise& p);
+Results simulate_episode_const_white_noise_open(const ParamsConstWhiteNoiseOpen& p);
+Results simulate_episode_const_white_noise_periodic(const ParamsConstWhiteNoisePeriodic& p);
+Results simulate_episode_cm_ps(const ParamsCMPS& p);  // Cass + Power Stroke model
+Results simulate_episode_3d_deterministic(const Params3DDet& p);
+Results simulate_episode_3d(const Params3D& p);
+
 
 } // namespace spde
