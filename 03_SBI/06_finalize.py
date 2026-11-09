@@ -1957,16 +1957,16 @@ def main():
         make_plots=True,
         verbose=True,
     )
-    print("\nSampled posterior-space points:")
-    print(posterior_res.samples_feature_space.head())
+    # print("\nSampled posterior-space points:")
+    # print(posterior_res.samples_feature_space.head())
 
-    print("\nPosterior diagnostics:")
-    print(posterior_res.diagnostics)
+    # print("\nPosterior diagnostics:")
+    # print(posterior_res.diagnostics)
 
-    export_samples(
-        posterior_res.samples_feature_space,
-        f"gp_logposterior_samples_{args.dim}.csv",
-    )
+    # export_samples(
+    #     posterior_res.samples_feature_space,
+    #     f"gp_logposterior_samples_{args.dim}.csv",
+    # )
 
     plot_mcmc_density(posterior_res.samples_feature_space)
 

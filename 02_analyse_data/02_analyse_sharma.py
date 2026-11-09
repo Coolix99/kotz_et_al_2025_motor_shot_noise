@@ -652,7 +652,7 @@ def main():
     dataset_path = os.path.join(CILIA_FOLDER,"structured/sharma")
     dataset = SharmaDataset(dataset_path)
     # dataset.clean()    
-    dataset.clean(delete_only=[HYDRO_CONTRIBUTION.key])
+    # dataset.clean(delete_only=[HYDRO_CONTRIBUTION.key])
     # dataset.clean(delete_only_exp_ids=["f34b4da146115fec"])#,"6279a8dd84538cbe"5fcc8a13641dc628
     
     df = collect_conditions(dataset)
@@ -671,7 +671,7 @@ def main():
 
     run_pipeline_with_gauge(dataset)
     out_csv = "./scalar_observables.csv"
-
+    
     collect_scalar_dense(
         dataset,
         df,

@@ -313,10 +313,9 @@ def collect_hydro_results(dataset: DataSet, conditions_df: pd.DataFrame, out_csv
         ]
 
         for it in items:
-            try:
-                val = it.resolve(dataset, os.path.join(dataset.path, exp_id))
-            except Exception:
-                continue
+            
+            val = it.resolve(dataset, os.path.join(dataset.path, exp_id))
+            
 
             rows.append({
                 "experiment_id": exp_id,
@@ -324,6 +323,9 @@ def collect_hydro_results(dataset: DataSet, conditions_df: pd.DataFrame, out_csv
                 "mean_R_free": float(val.get("mean_R_free", np.nan)),
                 "mean_R_fixed": float(val.get("mean_R_fixed", np.nan)),
                 "mean_R_chlamy": float(val.get("mean_R_chlamy", np.nan)),
+                "mean_power_free": float(val.get("mean_power_free", np.nan)),
+                "mean_power_fixed": float(val.get("mean_power_fixed", np.nan)),
+                "mean_power_chlamy": float(val.get("mean_power_chlamy", np.nan)),
             })
 
         realization.unload_data()
@@ -345,6 +347,7 @@ def collect_hydro_results(dataset: DataSet, conditions_df: pd.DataFrame, out_csv
         "algorithm",
         "mu_a", "mu", "eta", "zeta", "beta", "Nmotor", "mode",
         "mean_R_free", "mean_R_fixed", "mean_R_chlamy",
+        "mean_power_free", "mean_power_fixed", "mean_power_chlamy",
     ]
     cols = [c for c in cols if c in df.columns]
     df = df[cols]
@@ -505,12 +508,12 @@ def main():
 
         dataset_path = os.path.join(CILIA_FOLDER, "structured", name)
         out_csv = f"./scalar_observables_{name.replace('cass_2d_', '').replace('_phasespace','')}.csv"
-        hydro_csv = "./hydro_cass_2d.csv"
+        hydro_csv = "./hydro_cass_2d_100.csv"
 
         print(f"\n=== {name} ===")
 
         dataset = SimulationDataset(dataset_path)
-        #dataset.clean(delete_only=[HYDRO_CONTRIBUTION.key])
+        dataset.clean(delete_only=[HYDRO_CONTRIBUTION.key])
         # df = collect_conditions(dataset)
         # run_pipeline(dataset)
         # collect_scalar_dense(dataset, df, out_csv)

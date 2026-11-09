@@ -1,16 +1,16 @@
+from matplotlib.pylab import beta
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from matplotlib.ticker import FuncFormatter
+from bokeh.plotting import figure, row, show
+from bokeh.layouts import gridplot
+from bokeh.models import ColumnDataSource, HoverTool
 from matplotlib.colors import LogNorm
-from scipy.interpolate import griddata
-from matplotlib.colors import LogNorm
-from scipy.signal import find_peaks
-from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.ndimage import gaussian_filter
 
 # ================================
 # CONFIG
@@ -18,7 +18,7 @@ from scipy.ndimage import gaussian_filter
 F_RANGE = (0, 100)
 A_RANGE = (0, 1.0)
 LAM_RANGE = (1.0, 4.0)
-Q_RANGE = (0.1, 1e4)
+Q_RANGE = (0, 150)
 
 kcl_to_relN = {
     0: 1.00,
@@ -66,6 +66,29 @@ def prepare_experiment_df(csv_path):
         df["defect_rate_total"] = df["defect_rate_pos"] + df["defect_rate_neg"]
 
     print(f"prepare_experiment_df: {len(df)} entries")
+
+    return df
+
+def prepare_experiment_df_ODA(csv_path):
+    df = pd.read_csv(csv_path)
+
+    # keep only ATP=750
+    df = df[df["ATP_uM"] == 750].copy()
+    df = df[df["sexp"].isin(["ODA_KCl", "ODA_ATP"])].copy()
+    # map KCl → relN
+    kcl_keys = np.array(sorted(kcl_to_relN.keys()))
+    kcl_vals = df["KCl_mM"].to_numpy()
+
+    nearest = kcl_keys[
+        np.argmin(np.abs(kcl_vals[:, None] - kcl_keys[None, :]), axis=1)
+    ]
+    df["relN"] = np.vectorize(kcl_to_relN.get)(nearest)
+
+    df["condition"] = df["sexp"]
+
+    if "defect_rate_pos" in df.columns and "defect_rate_neg" in df.columns:
+        df = df.copy()
+        df["defect_rate_total"] = df["defect_rate_pos"] + df["defect_rate_neg"]
 
     return df
 
@@ -398,10 +421,10 @@ def plot_quantity(
     # =====================================================
     # SIMULATIONS
     # =====================================================
-    # _plot_sim(df_sim_2d, color="#1f77b4", label="simulation 2D")
-    # _plot_sim(df_sim_3d, color="green", label="simulation 3D")
-    _plot_sim(df_sim_2d, color="#adadad", label="Ncilium")
-    _plot_sim(df_sim_3d, color="#525252", label="5Ncilium")
+    _plot_sim(df_sim_2d, color="#1f77b4", label="simulation 2D")
+    _plot_sim(df_sim_3d, color="green", label="simulation 3D")
+    # _plot_sim(df_sim_2d, color="#adadad", label="Ncilium")
+    # _plot_sim(df_sim_3d, color="#525252", label="5Ncilium")
 
     # =====================================================
     # AXES
@@ -423,6 +446,74 @@ def plot_quantity(
     if ylabel.startswith("Frequency"):
         ax.legend(fontsize=LEGEND_SIZE)
 
+def plot_quantity_sim_only(
+    ax,
+    df_sim,
+    y_key,
+    ylabel,
+    vmin=None,
+    vmax=None,
+    log_scale=False,
+):
+    if df_sim is None or y_key not in df_sim.columns:
+        ax.axis("off")
+        return
+
+    df_s = df_sim.copy()
+
+    # normalize motor number
+    df_s["relN"] = df_s["Nmotor"] / 20.0
+
+    df_s = df_s.replace([np.inf, -np.inf], np.nan).dropna(subset=[y_key, "relN"])
+
+    if len(df_s) == 0:
+        ax.axis("off")
+        return
+
+    # aggregate
+    agg_s = (
+        df_s.groupby("relN")[y_key]
+        .mean()
+        .reset_index()
+        .sort_values("relN")
+    )
+
+    x_vals = agg_s["relN"].values
+    y_vals = agg_s[y_key].values
+
+    # line
+    ax.plot(
+        x_vals,
+        y_vals,
+        color="#1f77b4ff",
+        linewidth=2,
+    )
+
+    # markers
+    ax.scatter(
+        x_vals,
+        y_vals,
+        color="#1f77b4ff",
+        s=40,
+        marker="o",
+        label="simulation"
+    )
+
+    # axes
+    ax.set_xlabel(r"$N_\text{remain}/N$", fontsize=LABEL_SIZE)
+    ax.set_ylabel(ylabel, fontsize=LABEL_SIZE)
+
+    ax.tick_params(axis="both", labelsize=TICK_SIZE)
+
+    ax.set_xlim(0.5, 1.01)
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x*100:.0f}%"))
+
+    if vmin is not None and vmax is not None:
+        ax.set_ylim(vmin, vmax)
+
+    if log_scale:
+        ax.set_yscale("log")
+
 def plot_figure_3(df, df_sim_2d=None, df_sim_3d=None):
     fig, axes = plt.subplots(3, 2, figsize=(10, 12))
 
@@ -430,7 +521,7 @@ def plot_figure_3(df, df_sim_2d=None, df_sim_3d=None):
         ("f", r"Frequency $f_0$ [Hz]", *F_RANGE, False),
         ("amplitude", r"Amplitude $A$ [rad]", *A_RANGE, False),
         ("lambda", r"Wavelength $\lambda/L$", *LAM_RANGE, False),
-        ("Q", r"Quality factor Q", *Q_RANGE, True),
+        ("Q", r"Quality factor Q", *Q_RANGE, False),
     ]
 
     for i, (key, label, vmin, vmax, log_scale) in enumerate(quantities):
@@ -453,6 +544,107 @@ def plot_figure_3(df, df_sim_2d=None, df_sim_3d=None):
 
     plt.tight_layout()
     plt.show()
+
+def plot_figure_3_interactive(df):
+    df = df.replace([np.inf, -np.inf], np.nan)
+
+    # -------------------------------
+    # Hover tooltip
+    # -------------------------------
+    TOOLTIPS = [
+        ("experiment_id", "@experiment_id"),
+        ("ATP", "@ATP_uM"),
+        ("KCl", "@KCl_mM"),
+        ("condition", "@sexp"),
+        ("file", "@file"),
+        ("f", "@f"),
+        ("f_given", "@f_given"),
+        ("Q", "@Q"),
+        ("Q_given", "@Q_given"),
+        ("lambda", "@lambda"),
+        ("corr_length", "@corr_length"),
+        ("amplitude", "@amplitude"),
+    ]
+
+    def make_panel(y_key, ylabel, vmin=None, vmax=None, log_scale=False):
+        sub = df.dropna(subset=[y_key, "relN"]).copy()
+
+        source = ColumnDataSource(sub)
+
+        p = figure(
+            width=400,
+            height=300,
+            title=ylabel,
+            x_axis_label=r"$N_\text{remain}/N$",
+            y_axis_label=ylabel,
+            tooltips=TOOLTIPS,
+            y_axis_type="log" if log_scale else "linear",
+        )
+
+        # scatter (fixed)
+        p.scatter(
+            x="relN",
+            y=y_key,
+            source=source,
+            size=6,
+            alpha=0.4,
+            color="red",
+        )
+
+        # aggregate
+        agg = sub.groupby("relN")[y_key].agg(["mean", "std", "count"]).reset_index()
+        agg["sem"] = agg["std"] / np.sqrt(agg["count"].clip(lower=1))
+
+        agg_source = ColumnDataSource(agg)
+
+        # mean line
+        p.line("relN", "mean", source=agg_source, line_width=2, color="red")
+
+        # error bars
+        p.segment(
+            x0="relN", x1="relN",
+            y0=agg["mean"] - agg["sem"],
+            y1=agg["mean"] + agg["sem"],
+            line_width=2,
+            color="red",
+        )
+
+        # axes
+        p.x_range.start = 0.7
+        p.x_range.end = 1.01
+
+        if vmin is not None and vmax is not None:
+            p.y_range.start = vmin
+            p.y_range.end = vmax
+
+        return p
+
+    # -------------------------------
+    # panels (same as matplotlib)
+    # -------------------------------
+    panels = [
+        make_panel("f", "Frequency f [Hz]", *F_RANGE, False),
+        make_panel("amplitude", "Amplitude A", *A_RANGE, False),
+        make_panel("lambda", "Wavelength λ/L", *LAM_RANGE, False),
+        make_panel("Q", "Quality factor Q", *Q_RANGE, True),
+        make_panel("corr_length", "Correlation length ξ/L", 1, 2000, True),
+        make_panel("defect_rate_total", "Defect rate s⁻¹", 0, 20, False),
+    ]
+
+    # grid (3x2)
+    grid = gridplot([
+        panels[0:2],
+        panels[2:4],
+        panels[4:6],
+    ]) # type: ignore
+
+    show(grid)
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.interpolate import griddata
+from scipy.spatial import cKDTree
+from matplotlib.colors import LogNorm
 
 def plot_phase_space_ax(
     ax,
@@ -950,6 +1142,8 @@ def compute_mu_a_crits(df):
 
     return mu_a_crits
 
+# amplitude minimum
+from scipy.signal import find_peaks
 def detect_phase_transitions(df):
     df = df.copy()
     df["log10_Q"] = np.log10(df["Q"])
@@ -1178,6 +1372,11 @@ def plot_phase_diagnostics(df, cmap="viridis"):
     plt.tight_layout()
     plt.show()
 
+from matplotlib.colors import LinearSegmentedColormap
+import numpy as np
+import matplotlib.pyplot as plt
+
+
 def plot_SI_R2_limitcycle(
     df,
     matrix_size=3,
@@ -1314,6 +1513,37 @@ def plot_SI_R2_limitcycle(
 
     plt.tight_layout()
     plt.show()
+
+
+def prepare_simulation_2d_curve_df(csv_path):
+    df = pd.read_csv(csv_path).copy()
+
+    # rename to match the 3D / experiment plotting conventions
+    rename_map = {
+        "peak_freq_hz": "f",
+        "amplitude_band_10pct": "amplitude",
+        "wavelength_rel": "lambda",
+    }
+    df = df.rename(columns=rename_map)
+
+    # construct relN analogously
+    if "Nmotor" in df.columns:
+        df["relN"] = df["Nmotor"] / 85.0
+
+    # optional derived quantity
+    if "Q" in df.columns and "f" in df.columns:
+        df["D"] = df["Q"] / df["f"]
+
+    df['f']= df['f']*0.92
+    print(df['amplitude'])
+    return df
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.ndimage import gaussian_filter
 
 def get_hpd_levels(H, probs = [0.5, 0.95, 0.99]):
     H_flat = H.flatten()
@@ -2008,6 +2238,7 @@ def plot_defect_rates_singlepanel(
     plt.tight_layout()
     plt.show()
 
+
 def print_power_stats(df):
     # ---------------------------------------------
     # Filter: ATP = 750, KCl = 0, WT experiments
@@ -2055,6 +2286,354 @@ def print_power_stats(df):
         print(f"  std  = {std:.3f} fW")
         print(f"  SEM  = {sem:.3f} fW\n")
 
+def corner_plot_parameters_normalized(
+    df_2d=None, df_3d=None,
+    params=("K_d2_L2_over_B", "F0_L2_over_B", "F0_over_Fc", "v0",
+            "v0_eps0", "pi0_frac", "beta_eff"),
+    bins=40, sigma_smooth=1.0, plot_cloud=True, plot_contours=True,
+    use_2d=True, use_3d=True, eps0_key=None, L=10.0, a=0.2,
+    N_cilium=1.7e4, plot_selected=True
+):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from scipy.ndimage import gaussian_filter
+
+    def _add_derived_columns(df):
+        if df is None:
+            return None
+        df = df.copy()
+        B = df["B"].replace(0, np.nan) if "B" in df.columns else None
+        eps0 = None
+        if eps0_key is not None and eps0_key in df.columns:
+            eps0 = df[eps0_key].replace(0, np.nan)
+        else:
+            found = next((c for c in ("eps0", "epsilon0", "epsilon_0", "ϵ0") if c in df.columns), None)
+            if found is not None:
+                eps0 = df[found].replace(0, np.nan)
+            elif {"v0", "v0_eps0"}.issubset(df.columns):
+                eps0 = df["v0"] / df["v0_eps0"].replace(0, np.nan)
+        if B is not None:
+            if "F0" in df.columns:
+                df["F0_L2_over_B"] = df["F0"] * L**2 / B
+            if "Fc" in df.columns:
+                df["Fc_L2_over_B"] = df["Fc"] * L**2 / B
+            if "K_d2" in df.columns:
+                df["K_d2_L2_over_B"] = df["K_d2"] * L**2 / B
+        if "pi0" in df.columns and eps0 is not None:
+            df["pi0_frac"] = df["pi0"] / (df["pi0"] + eps0).replace(0, np.nan)
+        if B is not None and eps0 is not None and {"pi0", "b"}.issubset(df.columns):
+            tau = 1.0 / (df["pi0"] + eps0).replace(0, np.nan)
+            df["beta_eff"] = df["b"] * a * L**2 / (tau * B)
+        if {"F0", "Fc"}.issubset(df.columns):
+            df["F0_over_Fc"] = df["F0"] / df["Fc"].replace(0, np.nan)
+        return df
+
+    df_2d, df_3d = _add_derived_columns(df_2d), _add_derived_columns(df_3d)
+    param_info = {
+        "K_d2_L2_over_B": (r"$a^2KL^2/B$", (5, 20), "log"),
+        "F0_L2_over_B": (r"$F_0L^2/B$", (0.2, 10), "log"),
+        "F0_over_Fc": (r"$F_0/F_c$", (1, 10), "log"),
+        "v0": (r"$v_0$", (10, 100), "log"),
+        "v0_eps0": (r"$v_0/\epsilon_0$", (0.1, 1), "log"),
+        "pi0_frac": (r"$\pi_0/(\pi_0+\epsilon_0)$", (0, 1), "linear"),
+        "beta_eff": (r"$\beta$", None, "log"),
+    }
+
+    table_s1 = {
+        "Cass": {"mu_a": 1570, "mu": 10.0, "eta": 0.096, "zeta": 0.96,
+                 "beta": 2.0, "fstar": 2.0, "tau": 4e-3, "geometry": "2d",
+                 "color": "#808080"},
+        "2D": {"mu_a": 109, "mu": 8.0, "eta": 0.76, "zeta": 1.5,
+               "beta": 4.3, "fstar": 2.6, "tau": 2.6e-3, "geometry": "2d",
+               "color": "#1f77b4"},
+        "3D": {"mu_a": 142, "mu": 11.0, "eta": 0.76, "zeta": 4.4,
+               "beta": 4.7, "fstar": 2.5, "tau": 2.7e-3, "geometry": "3d",
+               "color": "#369b36"},
+    }
+
+    selected = {}
+    for name, p in table_s1.items():
+        density_factor = 2 if p["geometry"] == "2d" else 9
+        selected[name] = {
+            "K_d2_L2_over_B": p["mu"],
+            "F0_L2_over_B": density_factor * L * p["mu_a"] / (a * N_cilium),
+            "F0_over_Fc": p["fstar"],
+            "v0": a / (p["zeta"] * p["tau"]),
+            "v0_eps0": a / (p["zeta"] * (1 - p["eta"])),
+            "pi0_frac": p["eta"],
+            "beta_eff": p["beta"],
+            "color": p["color"],
+        }
+
+    def _scale_of(p):
+        return param_info.get(p, ("", None, "log"))[2]
+
+    def _transform(vals, scale):
+        vals = np.asarray(vals)
+        return np.log10(vals) if scale == "log" else vals
+
+    def _inverse_transform(vals, scale):
+        vals = np.asarray(vals)
+        return 10**vals if scale == "log" else vals
+
+    def get_samples(df, p1, p2):
+        if df is None or p1 not in df.columns or p2 not in df.columns:
+            return np.array([]), np.array([])
+        x, y = df[p1].to_numpy(), df[p2].to_numpy()
+        sx, sy = _scale_of(p1), _scale_of(p2)
+        mask = np.isfinite(x) & np.isfinite(y)
+        if sx == "log":
+            mask &= x > 0
+        if sy == "log":
+            mask &= y > 0
+        return x[mask], y[mask]
+
+    def compute_density(x, y, p_x, p_y):
+        sx, sy = _scale_of(p_x), _scale_of(p_y)
+        tx, ty = _transform(x, sx), _transform(y, sy)
+        xmin, xmax = np.percentile(tx, [2, 98])
+        ymin, ymax = np.percentile(ty, [2, 98])
+        dx, dy = xmax - xmin, ymax - ymin
+        H, xedges, yedges = np.histogram2d(
+            tx, ty, bins=bins,
+            range=[[xmin - 0.8 * dx, xmax + 0.8 * dx],
+                   [ymin - 0.8 * dy, ymax + 0.8 * dy]],
+            density=True
+        )
+        H = gaussian_filter(H, sigma=sigma_smooth)
+        if np.isfinite(H).any() and np.nanmax(H) > 0:
+            H /= np.nanmax(H)
+        Xc_t = 0.5 * (xedges[:-1] + xedges[1:])
+        Yc_t = 0.5 * (yedges[:-1] + yedges[1:])
+        return H, _inverse_transform(Xc_t, sx), _inverse_transform(Yc_t, sy)
+
+    levels = [np.exp(-0.5 * s**2) for s in (3, 2, 1)]
+    n = len(params)
+    fig, axes = plt.subplots(n, n, figsize=(2.5 * n, 2.5 * n), squeeze=False)
+
+    for i in range(n):
+        for j in range(n):
+            ax = axes[i, j]
+            if i <= j:
+                ax.axis("off")
+                continue
+            p_y, p_x = params[i], params[j]
+            if use_2d and df_2d is not None:
+                x, y = get_samples(df_2d, p_x, p_y)
+                if plot_cloud and len(x):
+                    ax.scatter(x, y, s=5, alpha=0.2, color="#1f77b4")
+                if plot_contours and len(x) > 50:
+                    H, Xc, Yc = compute_density(x, y, p_x, p_y)
+                    X, Y = np.meshgrid(Xc, Yc, indexing="ij")
+                    ax.contour(X, Y, H, levels=levels, colors="#1f77b4", linewidths=1.5)
+            if use_3d and df_3d is not None:
+                x, y = get_samples(df_3d, p_x, p_y)
+                if plot_cloud and len(x):
+                    ax.scatter(x, y, s=5, alpha=0.2, color="#369b36")
+                if plot_contours and len(x) > 50:
+                    H, Xc, Yc = compute_density(x, y, p_x, p_y)
+                    X, Y = np.meshgrid(Xc, Yc, indexing="ij")
+                    ax.contour(X, Y, H, levels=levels, colors="#369b36", linewidths=1.5)
+            if plot_selected:
+                for values in selected.values():
+                    x0, y0 = values[p_x], values[p_y]
+                    if np.isfinite(x0) and np.isfinite(y0):
+                        ax.scatter(x0, y0, s=55, color=values["color"],
+                                   edgecolor="black", linewidth=0.7, zorder=20)
+            ax.set_xscale(_scale_of(p_x))
+            ax.set_yscale(_scale_of(p_y))
+            if param_info[p_x][1] is not None:
+                ax.set_xlim(*param_info[p_x][1])
+            if param_info[p_y][1] is not None:
+                ax.set_ylim(*param_info[p_y][1])
+            ax.tick_params(axis="both", which="both", labelbottom=False,
+                           labeltop=False, labelleft=False, labelright=False,
+                           direction="in", top=True, right=True)
+            if i == n - 1:
+                ax.set_xlabel(param_info[p_x][0], fontsize=12)
+                ax.tick_params(axis="x", which="both", labelbottom=True)
+            if j == 0:
+                ax.set_ylabel(param_info[p_y][0], fontsize=12)
+                ax.tick_params(axis="y", which="both", labelleft=True)
+
+    plt.subplots_adjust(top=1, bottom=0.06, left=0.046, right=1,
+                        hspace=0.086, wspace=0.093)
+    plt.show()
+
+def corner_plot_parameters_main(
+    df_2d=None, df_3d=None, bins=40, sigma_smooth=1.0,
+    plot_cloud=True, plot_contours=True, use_2d=True, use_3d=True,
+    eps0_key=None, L=10.0, figsize=(7.5, 7.5), plot_selected=True
+):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from scipy.ndimage import gaussian_filter
+
+    row_params = ("F0_over_Fc", "v0_eps0", "eta")
+    col_params = ("F0_L2_over_B", "F0_over_Fc", "v0_eps0")
+    param_info = {
+        "F0_L2_over_B": (r"$F_0L^2/B$", (0.2, 10), "log"),
+        "F0_over_Fc": (r"$F_0/F_c$", (1, 10), "log"),
+        "v0_eps0": (r"$v_0/\epsilon_0$ [$\mu$m]", (0.1, 1), "log"),
+        "eta": (r"$\eta$", (0, 1), "linear"),
+    }
+    selected = {
+        "Cass": {
+            "F0_L2_over_B": 65.9 * L**2 / 840,
+            "F0_over_Fc": 2.0,
+            "v0_eps0": 0.230,
+            "eta": 0.096,
+            "color": "#808080",
+        },
+        "2D": {
+            "F0_L2_over_B": 5.4 * L**2 / 991,
+            "F0_over_Fc": 2.6,
+            "v0_eps0": 0.556,
+            "eta": 0.76,
+            "color": "#1f77b4",
+        },
+        "3D": {
+            "F0_L2_over_B": 25.6 * L**2 / 722,
+            "F0_over_Fc": 2.5,
+            "v0_eps0": 0.190,
+            "eta": 0.76,
+            "color": "#369b36",
+        },
+    }
+
+    def prepare_df(df):
+        if df is None:
+            return None
+        df = df.copy()
+        eps0 = None
+        if eps0_key is not None and eps0_key in df.columns:
+            eps0 = df[eps0_key].replace(0, np.nan)
+        else:
+            key = next(
+                (k for k in ("eps0", "epsilon0", "epsilon_0", "ϵ0")
+                 if k in df.columns),
+                None,
+            )
+            if key is not None:
+                eps0 = df[key].replace(0, np.nan)
+            elif {"v0", "v0_eps0"}.issubset(df.columns):
+                eps0 = df["v0"] / df["v0_eps0"].replace(0, np.nan)
+        if {"F0", "B"}.issubset(df.columns):
+            df["F0_L2_over_B"] = df["F0"] * L**2 / df["B"].replace(0, np.nan)
+        if {"F0", "Fc"}.issubset(df.columns):
+            df["F0_over_Fc"] = df["F0"] / df["Fc"].replace(0, np.nan)
+        if "v0_eps0" not in df.columns and eps0 is not None and "v0" in df.columns:
+            df["v0_eps0"] = df["v0"] / eps0
+        if "eta" not in df.columns and eps0 is not None and "pi0" in df.columns:
+            df["eta"] = df["pi0"] / (df["pi0"] + eps0).replace(0, np.nan)
+        return df
+
+    df_2d, df_3d = prepare_df(df_2d), prepare_df(df_3d)
+
+    def scale_of(key):
+        return param_info[key][2]
+
+    def transform(values, scale):
+        values = np.asarray(values)
+        return np.log10(values) if scale == "log" else values
+
+    def inverse_transform(values, scale):
+        values = np.asarray(values)
+        return 10**values if scale == "log" else values
+
+    def get_samples(df, x_key, y_key):
+        if df is None or x_key not in df.columns or y_key not in df.columns:
+            return np.array([]), np.array([])
+        x = df[x_key].to_numpy()
+        y = df[y_key].to_numpy()
+        mask = np.isfinite(x) & np.isfinite(y)
+        if scale_of(x_key) == "log":
+            mask &= x > 0
+        if scale_of(y_key) == "log":
+            mask &= y > 0
+        return x[mask], y[mask]
+
+    def compute_density(x, y, x_key, y_key):
+        sx, sy = scale_of(x_key), scale_of(y_key)
+        tx, ty = transform(x, sx), transform(y, sy)
+        xmin, xmax = np.percentile(tx, [2, 98])
+        ymin, ymax = np.percentile(ty, [2, 98])
+        dx, dy = xmax - xmin, ymax - ymin
+        if dx == 0:
+            dx = max(abs(xmin) * 0.1, 0.1)
+        if dy == 0:
+            dy = max(abs(ymin) * 0.1, 0.1)
+        H, xedges, yedges = np.histogram2d(
+            tx, ty, bins=bins,
+            range=[
+                [xmin - 0.8 * dx, xmax + 0.8 * dx],
+                [ymin - 0.8 * dy, ymax + 0.8 * dy],
+            ],
+            density=True,
+        )
+        H = gaussian_filter(H, sigma=sigma_smooth)
+        if np.isfinite(H).any() and np.nanmax(H) > 0:
+            H /= np.nanmax(H)
+        xc = inverse_transform(0.5 * (xedges[:-1] + xedges[1:]), sx)
+        yc = inverse_transform(0.5 * (yedges[:-1] + yedges[1:]), sy)
+        return H, xc, yc
+
+    levels = [np.exp(-0.5 * s**2) for s in (3, 2, 1)]
+    fig, axes = plt.subplots(
+        len(row_params), len(col_params), figsize=figsize, squeeze=False
+    )
+
+    for i, y_key in enumerate(row_params):
+        for j, x_key in enumerate(col_params):
+            ax = axes[i, j]
+            if row_params.index(y_key) < col_params.index(x_key):
+                ax.axis("off")
+                continue
+            for df, color in ((df_2d, "#1f77b4"), (df_3d, "#369b36")):
+                enabled = use_2d if df is df_2d else use_3d
+                if not enabled:
+                    continue
+                x, y = get_samples(df, x_key, y_key)
+                if plot_cloud and len(x):
+                    ax.scatter(x, y, s=5, alpha=0.2, color=color)
+                if plot_contours and len(x) > 50:
+                    H, xc, yc = compute_density(x, y, x_key, y_key)
+                    X, Y = np.meshgrid(xc, yc, indexing="ij")
+                    ax.contour(
+                        X, Y, H, levels=levels,
+                        colors=color, linewidths=1.5,
+                    )
+            if plot_selected:
+                for values in selected.values():
+                    x0, y0 = values[x_key], values[y_key]
+                    if np.isfinite(x0) and np.isfinite(y0):
+                        ax.scatter(
+                            x0, y0, s=55, marker="o",
+                            color=values["color"], edgecolor="black",
+                            linewidth=0.7, zorder=20,
+                        )
+            ax.set_xscale(scale_of(x_key))
+            ax.set_yscale(scale_of(y_key))
+            ax.set_xlim(*param_info[x_key][1])
+            ax.set_ylim(*param_info[y_key][1])
+            ax.tick_params(
+                axis="both", which="both", labelbottom=False,
+                labeltop=False, labelleft=False, labelright=False,
+                direction="in", top=True, right=True,
+            )
+            if i == len(row_params) - 1:
+                ax.set_xlabel(param_info[x_key][0], fontsize=12)
+                ax.tick_params(axis="x", which="both", labelbottom=True)
+            if j == 0:
+                ax.set_ylabel(param_info[y_key][0], fontsize=12)
+                ax.tick_params(axis="y", which="both", labelleft=True)
+
+    plt.subplots_adjust(
+        top=0.995, bottom=0.09, left=0.10, right=0.995,
+        hspace=0.09, wspace=0.09,
+    )
+    plt.show()
+
 # ================================
 # MAIN
 # ================================
@@ -2065,45 +2644,46 @@ def main():
     print_power_stats(df_exp)
     
     print("Unique relN:", sorted(df_exp["relN"].unique()))
-    compute_sbi_targets(df_exp)
-    plot_SI_R2_limitcycle(df_exp)
+    # compute_sbi_targets(df_exp)
+    # plot_SI_R2_limitcycle(df_exp)
     df_cass_hydro = pd.read_csv("hydro_cass_2d.csv")
-    print_hydro_boxplot_stats(df_exp, df_cass_hydro)
+    # print_hydro_boxplot_stats(df_exp, df_cass_hydro)
     plot_hydro_boxplot(df_exp, df_cass_hydro)
     
     
+    #2d things 
+    # df_sim_2d_phasespace = prepare_simulation_2d_phasespace_df("./scalar_observables_phasespace.csv") 
+    # df_sim_2d_wn= prepare_simulation_2d_phasespace_df("./scalar_observables_wn.csv") 
+    # df_sim_2d_cwn = prepare_simulation_2d_phasespace_df("./scalar_observables_cwn.csv") 
 
-    df_sim_2d_phasespace = prepare_simulation_2d_phasespace_df("./scalar_observables_phasespace.csv") 
-    df_sim_2d_wn= prepare_simulation_2d_phasespace_df("./scalar_observables_wn.csv") 
-    df_sim_2d_cwn = prepare_simulation_2d_phasespace_df("./scalar_observables_cwn.csv") 
-
-    df_sim_2d_wn = append_infinite_motor_rows(df_sim_2d_wn, df_sim_2d_phasespace)
-    df_sim_2d_cwn = append_infinite_motor_rows(df_sim_2d_cwn, df_sim_2d_phasespace)
-    plot_phase_diagnostics(df_sim_2d_phasespace)
+    # df_sim_2d_wn = append_infinite_motor_rows(df_sim_2d_wn, df_sim_2d_phasespace)
+    # df_sim_2d_cwn = append_infinite_motor_rows(df_sim_2d_cwn, df_sim_2d_phasespace)
+    # # plot_phase_diagnostics(df_sim_2d_phasespace)
+    # # df = prepare_experiment_df_ODA(csv_path)
    
-    N0s = np.array([85, 500, np.inf]) * 200
-    mu_a_crits = compute_mu_a_crits(df_sim_2d_phasespace)
-    transitions = detect_phase_transitions(df_sim_2d_phasespace)
-    plot_figure_2(
-        df_sim_2d_phasespace,
-        transitions,
-        N0s,
-        mu_a_crits=mu_a_crits
-    )
+    # N0s = np.array([85, 500, np.inf]) * 200
+    # mu_a_crits = compute_mu_a_crits(df_sim_2d_phasespace)
+    # transitions = detect_phase_transitions(df_sim_2d_phasespace)
+    # plot_figure_2(
+    #     df_sim_2d_phasespace,
+    #     transitions,
+    #     N0s,
+    #     mu_a_crits=mu_a_crits
+    # )
 
-    plot_figure_2(
-        df_sim_2d_wn,
-        transitions,
-        N0s,
-        mu_a_crits=mu_a_crits
-    )
+    # plot_figure_2(
+    #     df_sim_2d_wn,
+    #     transitions,
+    #     N0s,
+    #     mu_a_crits=mu_a_crits
+    # )
 
-    plot_figure_2(
-        df_sim_2d_cwn,
-        transitions,
-        N0s,
-        mu_a_crits=mu_a_crits
-    )
+    # plot_figure_2(
+    #     df_sim_2d_cwn,
+    #     transitions,
+    #     N0s,
+    #     mu_a_crits=mu_a_crits
+    # )
 
     df_sim_3d = pd.read_csv("scalar_observables_cass_3d_extraction.csv")
     df_sim_2d = pd.read_csv("scalar_observables_cass_2d_extraction.csv")
@@ -2111,29 +2691,29 @@ def main():
     df_sim_2d['relN']=df_sim_2d['Nmotor']/85.0 
     plot_figure_3(df_exp, df_sim_2d=df_sim_2d, df_sim_3d=df_sim_3d)
   
-    df_exp    = add_cov_columns(df_exp)
-    df_sim_2d = add_cov_columns(df_sim_2d)
-    df_sim_3d = add_cov_columns(df_sim_3d)
-    plot_figure_3_threepanel_dualaxis(
-        df_exp,
-        df_sim_2d=df_sim_2d,
-        df_sim_3d=df_sim_3d,
-        ylims_sim={
-            "amplitude_t_cov": (0, 10),
-            "lambda_t_cov": (0, 50),
-            "corr_length": (50, 10000),
-        },
-        ylims_exp={
-            "amplitude_t_cov": (0, 30),
-            "lambda_t_cov": (0, 150),
-            "corr_length": (50, 2000),
-        },
-        ylabels_sim={
-            "amplitude_t_cov": r"CoV local amplitude [%]",
-            "lambda_t_cov": r"CoV inst. wavelength [%]",
-            "corr_length": r"Correlation length $\xi/L$",
-        }
-    )
+    # df_exp    = add_cov_columns(df_exp)
+    # df_sim_2d = add_cov_columns(df_sim_2d)
+    # df_sim_3d = add_cov_columns(df_sim_3d)
+    # plot_figure_3_threepanel_dualaxis(
+    #     df_exp,
+    #     df_sim_2d=df_sim_2d,
+    #     df_sim_3d=df_sim_3d,
+    #     ylims_sim={
+    #         "amplitude_t_cov": (0, 10),
+    #         "lambda_t_cov": (0, 50),
+    #         "corr_length": (50, 10000),
+    #     },
+    #     ylims_exp={
+    #         "amplitude_t_cov": (0, 30),
+    #         "lambda_t_cov": (0, 150),
+    #         "corr_length": (50, 2000),
+    #     },
+    #     ylabels_sim={
+    #         "amplitude_t_cov": r"CoV local amplitude [%]",
+    #         "lambda_t_cov": r"CoV inst. wavelength [%]",
+    #         "corr_length": r"Correlation length $\xi/L$",
+    #     }
+    # )
 
     plot_defect_rates_singlepanel(
         df_exp,
@@ -2141,11 +2721,11 @@ def main():
         df_sim_3d=df_sim_3d,
     )
 
-    df_sim_cass = pd.read_csv("scalar_observables_cass_2d_extraction_cass.csv")
-    df_sim_cass5fold = pd.read_csv("scalar_observables_cass_2d_extraction_cass_5fold.csv")
-    df_sim_cass['relN']=df_sim_cass['Nmotor']/85.0 
-    df_sim_cass5fold['relN']=df_sim_cass5fold['Nmotor']/500.0 
-    plot_figure_3(df_exp, df_sim_2d=df_sim_cass, df_sim_3d=df_sim_cass5fold)
+    # df_sim_cass = pd.read_csv("scalar_observables_cass_2d_extraction_cass.csv")
+    # df_sim_cass5fold = pd.read_csv("scalar_observables_cass_2d_extraction_cass_5fold.csv")
+    # df_sim_cass['relN']=df_sim_cass['Nmotor']/85.0 
+    # df_sim_cass5fold['relN']=df_sim_cass5fold['Nmotor']/500.0 
+    # plot_figure_3(df_exp, df_sim_2d=df_sim_cass, df_sim_3d=df_sim_cass5fold)
 
     
     df_sampled_3d = pd.read_csv("gp_logposterior_samples_3d.csv")
@@ -2153,11 +2733,19 @@ def main():
 
     params = ("K_d2","B","F0","Fc","v0","v0_eps0","pi0","b")
 
-    print_parameter_stats(df_sampled_2d, "2D", params)
-    print_parameter_stats(df_sampled_3d, "3D", params)
-    plot_weighted_density_F0_v0(df_sampled_2d,df_sampled_3d)
-    corner_plot_parameters(df_sampled_2d, df_sampled_3d, plot_cloud=False)
-   
+    # print_parameter_stats(df_sampled_2d, "2D", params)
+    # print_parameter_stats(df_sampled_3d, "3D", params)
+    # plot_weighted_density_F0_v0(df_sampled_2d,df_sampled_3d)
+    # corner_plot_parameters(df_sampled_2d, df_sampled_3d, plot_cloud=False)
+    corner_plot_parameters_normalized(df_2d=df_sampled_2d, df_3d=df_sampled_3d, plot_cloud=False)
+    corner_plot_parameters_main(
+        df_2d=df_sampled_2d,
+        df_3d=df_sampled_3d,
+        plot_cloud=False,
+        plot_contours=True,
+    )
+    # plot_figure_3_interactive(df_exp)
+    #
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,6 @@
-# Motor Shot Noise Explains Active Fluctuations in a Single Cilium
+# Motor shot noise explains active fluctuations in a single cilium
 
-Source code used for the paper *Motor Shot Noise Explains Active Fluctuations in a Single Cilium*.  
+Source code used for the paper *Motor shot noise explains active fluctuations in a single cilium*.  
 Authors: **Maximilian Kotz, Veikko F. Geyer, and Benjamin M. Friedrich**
 
 ---

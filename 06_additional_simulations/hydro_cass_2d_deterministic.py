@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 from scipy.sparse.linalg import LinearOperator, gmres
-
+from pathlib import Path
 
 @dataclass
 class Params:
@@ -515,100 +515,104 @@ import csv
 from cilia.algorithms.a_estimation import estimate_amplitude_psd
 from cilia.algorithms.f_estimation import estimate_f_from_tangent_angle_power
 
+OUTPUT_CSV = Path("results_hydro_fluc.csv")
+
+BASE_LAMBDA_VALUES = [0.01, 0.1, 0.5, 1, 1.5, 2, 2.5, 5, 10, 15]
+EXTRA_LAMBDA_VALUES = [3.0, 4.0, 6.0, 7.0, 8.0, 12.5, 17.5, 20.0, 25.0]
+BETA_VALUES = [1.0, 2.0, 3.0]
+CSV_HEADER = ["lambda_h", "beta", "amplitude", "frequency"]
+
+def key(lam, beta):
+    return (round(float(lam), 12), round(float(beta), 12))
+
+def read_existing_keys(filename):
+    if not filename.exists():
+        return set()
+    existing = set()
+    with open(filename, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            existing.add(key(row["lambda_h"], row["beta"]))
+    return existing
+
+def append_result(filename, row):
+    write_header = not filename.exists() or filename.stat().st_size == 0
+    with open(filename, "a", newline="") as f:
+        writer = csv.writer(f)
+        if write_header:
+            writer.writerow(CSV_HEADER)
+        writer.writerow(row)
+
+def run_one(lam, beta):
+    print(f"\nRunning lambda_h = {lam}, beta = {beta}")
+    params = Params(
+        mu_a=1570,
+        mu=10,
+        zeta=0.96,
+        eta=0.096,
+        fstar=2.0,
+        beta=beta,
+        lambda_h=lam,
+        N=75,
+        dt=5e-3,
+        T=1000,
+    )
+
+    t0 = time.time()
+    result = run_simulation(params)
+    t1 = time.time()
+
+    gamma = result["gamma"]
+    time_arr = result["time"]
+    s = result["s"]
+
+    mask = time_arr >= 10.0
+    gamma = gamma[mask]
+    time_arr = time_arr[mask]
+
+    dt_eff = params.dt * params.save_every
+    print(dt_eff, time_arr[1] - time_arr[0])
+
+    A = estimate_amplitude_psd(
+        tangent_angles=gamma,
+        arclength=s,
+    )
+
+    freq = estimate_f_from_tangent_angle_power(
+        tangent_angles=gamma,
+        arclength=s,
+        dt_frame=dt_eff,
+    )
+
+    print(
+        f"lambda_h={lam:>6}, beta={beta:>4}, "
+        f"A={A:.4e}, f={freq:.4f}, runtime={t1-t0:.2f}s"
+    )
+
+    return [lam, beta, A, freq]
 
 def main():
-    lambda_values = [0.01, 0.1, 0.5, 1, 1.5,  2, 2.5, 5, 10, 15]
-    beta_values = [1.0, 2.0, 3.0]
-
-    results = []
-
-    for beta in beta_values:
+    lambda_values = sorted(set(BASE_LAMBDA_VALUES + EXTRA_LAMBDA_VALUES))
+    existing = read_existing_keys(OUTPUT_CSV)
+    print("Using CSV:", OUTPUT_CSV.resolve())
+    print(f"Found {len(existing)} existing parameter combinations.")
+    print(existing) 
+    
+    for beta in BETA_VALUES:
         for lam in lambda_values:
-            print(f"\nRunning lambda_h = {lam}, beta = {beta}")
+            if key(lam, beta) in existing:
+                print(f"Skipping existing lambda_h={lam}, beta={beta}")
+                continue
+            
+            try:
+                row = run_one(lam, beta)
+            except:
+                print('crash in ', lam, beta)
+                continue
+            append_result(OUTPUT_CSV, row)
+            existing.add(key(lam, beta))
 
-            params = Params(
-                mu_a=1570,
-                mu=10,
-                zeta=0.96,
-                eta=0.096,
-                fstar=2.0,
-                beta=beta,
-                lambda_h=lam,
-                N=75,
-                dt=5e-3,
-                T=1000,
-            )
-
-            t0 = time.time()
-            result = run_simulation(params)
-            t1 = time.time()
-
-            gamma = result["gamma"]      # (time, s)
-            time_arr = result["time"]
-            s = result["s"]
-
-            # -----------------------------
-            # REMOVE TRANSIENT
-            # -----------------------------
-            mask = time_arr >= 10.0
-            gamma = gamma[mask]
-            time_arr = time_arr[mask]
-
-            # effective dt (important!)
-            dt_eff = params.dt * params.save_every
-            print(dt_eff, time_arr[1]-time_arr[0])
-            # -----------------------------
-            # AMPLITUDE (cilia version)
-            # -----------------------------
-            A = estimate_amplitude_psd(
-                tangent_angles=gamma,
-                arclength=s,
-            )
-
-            # -----------------------------
-            # FREQUENCY (cilia version)
-            # -----------------------------
-            freq = estimate_f_from_tangent_angle_power(
-                tangent_angles=gamma,
-                arclength=s,
-                dt_frame=dt_eff,
-            )
-
-            results.append([lam, beta, A, freq])
-
-            print(
-                f"lambda_h={lam:>6}, beta={beta:>4}, "
-                f"A={A:.4e}, f={freq:.4f}, runtime={t1-t0:.2f}s"
-            )
-
-    # -----------------------------
-    # SAVE CSV
-    # -----------------------------
-    with open("results_hydro_fluc.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["lambda_h", "beta", "amplitude", "frequency"])
-        writer.writerows(results)
-
-    print("\nSaved results to results_hydro_fluc.csv")
-
-    # -----------------------------
-    # OPTIONAL: quick plot
-    # -----------------------------
-    results = np.array(results)
-
-    plt.figure(figsize=(6,4))
-    for beta in beta_values:
-        mask = results[:,1] == beta
-        plt.plot(results[mask,0], results[mask,2], "o-", label=f"beta={beta}")
-
-    plt.xscale("log")
-    plt.xlabel(r"$\lambda_h$")
-    plt.ylabel(r"Amplitude")
-    plt.title("Amplitude vs hydrodynamics")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
+    print(f"\nAppended new results to {OUTPUT_CSV}")
 
 def plot_results_from_csv(filename="results_hydro_fluc.csv"):
 
@@ -687,6 +691,68 @@ def plot_results_from_csv(filename="results_hydro_fluc.csv"):
     plt.tight_layout(rect=[0, 0, 0.88, 1])  # type: ignore
     plt.show()
 
+def plot_results_from_csv_linear_Baxis(filename="results_hydro_fluc.csv"):
+    data = np.genfromtxt(filename, delimiter=",", names=True)
+
+    lam = data["lambda_h"]
+    beta = data["beta"]
+    amp = data["amplitude"]
+    freq = data["frequency"]
+
+    beta_unique = np.unique(beta)
+    colors = ["#b8b8b8", "#5b5c5b", "#000000"]
+
+    xi_parallel = 0.69e-3 / 0.7
+    L = 10.0
+    tau = 4e-3
+
+    def lam_to_B(x):
+        x = np.asarray(x)
+        return xi_parallel * L**4 / (tau * np.maximum(x, 1e-9))
+
+    def B_to_lam(B):
+        return xi_parallel * L**4 / (tau * B)
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharex=True)
+
+    for i, b in enumerate(beta_unique):
+        mask = beta == b
+        idx = np.argsort(lam[mask])
+        label = rf"$\beta={b:g}$"
+
+        axes[0].plot(lam[mask][idx], amp[mask][idx], "o-", color=colors[i % len(colors)], linewidth=2, markersize=6, label=label)
+        axes[1].plot(lam[mask][idx], freq[mask][idx] * 250, "o-", color=colors[i % len(colors)], linewidth=2, markersize=6, label=label)
+
+    for ax in axes:
+        ax.set_xlim(0, 25.5)
+        ax.set_xlabel(r"$\Lambda$", fontsize=16)
+        ax.tick_params(axis="both", labelsize=13)
+
+        # dashed line at B = 840 pN µm²
+        ax.axvline(B_to_lam(840), linestyle="--", color="black", linewidth=1.5)
+
+        secax = ax.secondary_xaxis("top", functions=(lam_to_B, B_to_lam))
+        secax.set_xlabel(r"$B$ [$\mathrm{pN}\,\mu\mathrm{m}^2$]", fontsize=16, color="grey")
+        secax.tick_params(axis="x", labelsize=13, colors="grey")
+        secax.spines["top"].set_color("grey")
+
+        B_ticks = [100, 250, 840]
+        secax.set_xticks(B_ticks)
+        secax.set_xticklabels(["100", "250", "840"])
+    print(B_to_lam(840),B_to_lam(250),B_to_lam(100))
+    axes[0].set_ylabel(r"Amplitude $A$ [rad]", fontsize=16)
+    axes[0].set_ylim(0, 1)
+
+    axes[1].set_ylabel(r"Frequency $f_0$ [Hz]", fontsize=16)
+    axes[1].set_ylim(0, 100)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, fontsize=13)
+
+    plt.tight_layout(rect=[0, 0, 0.88, 1])
+    plt.show()
+
 if __name__ == "__main__":
-    #main()
-    plot_results_from_csv()
+    main()
+    # plot_results_from_csv()
+    plot_results_from_csv_linear_Baxis()
